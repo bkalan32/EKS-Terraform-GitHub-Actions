@@ -1,5 +1,8 @@
-resource "aws_eks_cluster" "eks" {
+############################################
+# EKS Cluster
+############################################
 
+resource "aws_eks_cluster" "eks" {
   count    = var.is-eks-cluster-enabled == true ? 1 : 0
   name     = var.cluster-name
   role_arn = aws_iam_role.eks-cluster-role[count.index].arn
@@ -12,9 +15,11 @@ resource "aws_eks_cluster" "eks" {
     security_group_ids      = [aws_security_group.eks-cluster-sg.id]
   }
 
-
   access_config {
-    authentication_mode                         = "CONFIG_MAP"
+    # IMPORTANT:
+    # - CONFIG_MAP only => aws-auth only (what you had)
+    # - API or API_AND_CONFIG_MAP => enables EKS Access Entries (what we need)
+    authentication_mode                         = "API_AND_CONFIG_MAP"
     bootstrap_cluster_creator_admin_permissions = true
   }
 
@@ -24,15 +29,46 @@ resource "aws_eks_cluster" "eks" {
   }
 }
 
-# OIDC Provider
+############################################
+# EKS Access: grant kubectl access to EC2 role
+############################################
+
+resource "aws_eks_access_entry" "ec2_role_admin" {
+  # If cluster count is 0, this resource won't be created either.
+  # If you ever plan to toggle count, we can gate this with count too.
+  cluster_name  = aws_eks_cluster.eks[0].name
+  principal_arn = "arn:aws:iam::831926603642:role/ec2-role"
+  type          = "STANDARD"
+
+  depends_on = [aws_eks_cluster.eks]
+}
+
+resource "aws_eks_access_policy_association" "ec2_role_admin_policy" {
+  cluster_name  = aws_eks_cluster.eks[0].name
+  principal_arn = aws_eks_access_entry.ec2_role_admin.principal_arn
+  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.ec2_role_admin]
+}
+
+############################################
+# OIDC Provider (unchanged)
+############################################
+
 resource "aws_iam_openid_connect_provider" "eks-oidc" {
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = [data.tls_certificate.eks-certificate.certificates[0].sha1_fingerprint]
   url             = data.tls_certificate.eks-certificate.url
 }
 
+############################################
+# AddOns for EKS Cluster (unchanged)
+############################################
 
-# AddOns for EKS Cluster
 resource "aws_eks_addon" "eks-addons" {
   for_each      = { for idx, addon in var.addons : idx => addon }
   cluster_name  = aws_eks_cluster.eks[0].name
@@ -45,7 +81,10 @@ resource "aws_eks_addon" "eks-addons" {
   ]
 }
 
-# NodeGroups
+############################################
+# NodeGroups (unchanged)
+############################################
+
 resource "aws_eks_node_group" "ondemand-node" {
   cluster_name    = aws_eks_cluster.eks[0].name
   node_group_name = "${var.cluster-name}-on-demand-nodes"
@@ -58,11 +97,11 @@ resource "aws_eks_node_group" "ondemand-node" {
     max_size     = var.max_capacity_on_demand
   }
 
-
   subnet_ids = [aws_subnet.private-subnet[0].id, aws_subnet.private-subnet[1].id, aws_subnet.private-subnet[2].id]
 
   instance_types = var.ondemand_instance_types
   capacity_type  = "ON_DEMAND"
+
   labels = {
     type = "ondemand"
   }
@@ -70,6 +109,7 @@ resource "aws_eks_node_group" "ondemand-node" {
   update_config {
     max_unavailable = 1
   }
+
   tags = {
     "Name" = "${var.cluster-name}-ondemand-nodes"
   }
@@ -89,7 +129,6 @@ resource "aws_eks_node_group" "spot-node" {
     max_size     = var.max_capacity_spot
   }
 
-
   subnet_ids = [aws_subnet.private-subnet[0].id, aws_subnet.private-subnet[1].id, aws_subnet.private-subnet[2].id]
 
   instance_types = var.spot_instance_types
@@ -98,13 +137,16 @@ resource "aws_eks_node_group" "spot-node" {
   update_config {
     max_unavailable = 1
   }
+
   tags = {
     "Name" = "${var.cluster-name}-spot-nodes"
   }
+
   labels = {
     type      = "spot"
     lifecycle = "spot"
   }
+
   disk_size = 50
 
   depends_on = [aws_eks_cluster.eks]
